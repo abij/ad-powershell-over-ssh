@@ -1,16 +1,21 @@
 package nl.abij.service;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.vngx.jsch.*;
-import org.vngx.jsch.config.SSHConfigConstants;
-import org.vngx.jsch.config.SessionConfig;
-import org.vngx.jsch.exception.JSchException;
-
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.Charset;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.vngx.jsch.ChannelShell;
+import org.vngx.jsch.ChannelType;
+import org.vngx.jsch.JSch;
+import org.vngx.jsch.Session;
+import org.vngx.jsch.Util;
+import org.vngx.jsch.config.SSHConfigConstants;
+import org.vngx.jsch.config.SessionConfig;
+import org.vngx.jsch.exception.JSchException;
 
 public class PowershellSession {
 
@@ -73,18 +78,18 @@ public class PowershellSession {
     private void checkConnection() throws JSchException, IOException {
         if (!session.isConnected()) {
             session.connect(socketTimeout, password);
-            LOG.debug("Session connected to {}", session.getHost());
+            LOG.debug("Session connected to host: {}", session.getHost());
         } else {
             LOG.debug("Session is still connected.");
         }
         if (shell == null || !shell.isConnected()) {
             shell = session.openChannel(ChannelType.SHELL);
+            shell.connect(socketTimeout);
+            LOG.debug("ChannelShell is connected.");
 
             fromServer = shell.getInputStream();
             toServer = shell.getOutputStream();
 
-            shell.connect(socketTimeout);
-            LOG.debug("ChannelShell is connected.");
             readFromServer(); // Read initial data: Windows PowerShell ... All rights reserved.
             loadModuleActiveDirectory();
         } else {
@@ -93,6 +98,7 @@ public class PowershellSession {
     }
 
     private void loadModuleActiveDirectory() throws IOException {
+        LOG.debug("import-module ActiveDirectory...");
         writeToServer("import-module ActiveDirectory");
         sleep(AD_MODULE_LOADINGTIME, "Failed to sleep after loading module ActiveDirectory.");
         verifyCommandSucceded();
@@ -100,28 +106,28 @@ public class PowershellSession {
 
     private void writeToServer(String command) throws IOException {
         String commandWithEnter = command;
-        if (!command.endsWith("\\n")) {
-            commandWithEnter += "\\n";
+        if (!command.endsWith("\r\n")) {
+            commandWithEnter += "\r\n";
         }
         toServer.write((commandWithEnter).getBytes(UTF8));
         toServer.flush();
     }
 
     private String readFromServer() throws IOException {
-        String result;
-        StringBuilder sb = new StringBuilder();
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
         byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
 
-        String linePropmt = "\\" + username + ">"; // indicates console has new-line is ready for input, stop reading.
-        long maxReadTimeout = System.currentTimeMillis() + readTimeout;
+        String linePrompt = "\\" + username + ">"; // indicates console has new-line is ready for input, stop reading.
+        long timeout = System.currentTimeMillis() + readTimeout;
 
-        // Store result, go in while-loop if result !contains(linePrompt) and timeout is not reached.
-        while (!(result = sb.toString()).contains(linePropmt) && maxReadTimeout < System.currentTimeMillis()) {
+        while (System.currentTimeMillis() < timeout && !Util.byte2str(bos.toByteArray()).contains(linePrompt)) {
             while (fromServer.available() > 0) {
-                if (fromServer.read(buffer, 0, DEFAULT_BUFFER_SIZE) < 0) { // No bytes read (-1) -> stop?
+                int count = fromServer.read(buffer, 0, DEFAULT_BUFFER_SIZE);
+                if (count >= 0) {
+                    bos.write(buffer, 0, count);
+                } else {
                     break;
                 }
-                sb.append(new String(buffer, UTF8));
             }
             if (shell.isClosed()) {
                 break;
@@ -129,16 +135,17 @@ public class PowershellSession {
             // Don't spin like crazy though the while loop
             sleep(pollTimeout, "Failed to sleep between reads with pollTimeout: " + pollTimeout);
         }
-        LOG.debug(result);
+        String result = bos.toString("UTF-8");
+        LOG.debug("read from server:\n{}", result);
         return result;
     }
 
     /**
-     * @throws PowershellException If the message was not executed succesfull, with details info.
+     * @throws PowershellException If the message was not executed successfully, with details info.
      */
     private void verifyCommandSucceded() throws IOException {
         String message = readFromServer();
-        writeToServer("$?\\n"); // Aks powershell status of last command?
+        writeToServer("$?"); // Aks powershell status of last command?
 
         if (!readFromServer().contains("True")) {
             throw new PowershellException(message);

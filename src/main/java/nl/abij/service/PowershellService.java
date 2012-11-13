@@ -1,10 +1,13 @@
 package nl.abij.service;
 
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
 import org.apache.commons.lang.StringUtils;
 import org.vngx.jsch.exception.JSchException;
-
-import java.io.IOException;
-import java.util.*;
 
 public class PowershellService {
 
@@ -14,10 +17,10 @@ public class PowershellService {
     private static final String CREATE_USER =
             "New-ADUser -SamAccountName \"${samAccountName}\"" +
             " -Name \"${name}\"" +
-            " -DisplayName ${displayname}" +
+            " -DisplayName \"${displayname}\"" +
             " -EmailAddress \"${email}\"" +
             " -AccountPassword (ConvertTo-SecureString -AsPlainText \"${passwordPlain}\" -Force)" +
-            " -ChangePasswordAtLogin $false -PasswordNeverExpires $true -Enabled $true" +
+            " -ChangePasswordAtLogon $false -PasswordNeverExpires $true -Enabled $true" +
             " -path \"${adUserPath}\"";
     private static final String DELETE_USER = "Remove-ADUser -identity \"${samAccountName}\" -Confirm:$false";
 
@@ -30,7 +33,7 @@ public class PowershellService {
         model.put("displayname", displayname);
         model.put("email", email);
         model.put("passwordPlain", password);
-        model.put("adUserGroup", adUserPath);
+        model.put("adUserPath", adUserPath);
 
         powershellSession.execute(commando(CREATE_USER, model));
     }
@@ -57,7 +60,8 @@ public class PowershellService {
         String[] replaceList = model.values().toArray(new String[model.size()]);
         String command = StringUtils.replaceEach(template, searchList.toArray(new String[model.size()]), replaceList);
 
-        if (command.matches("$\\{.+\\}")) {
+        //TODO Nicer: pattern matching ${.+}
+        if (command.contains("${")) {
             throw new IllegalStateException("Command contains unfilled parameters: " + command);
         }
         return command;

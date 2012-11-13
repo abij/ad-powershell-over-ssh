@@ -1,6 +1,5 @@
 package nl.abij.service;
 
-import junit.framework.TestCase;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -31,6 +30,7 @@ public class PowershellServiceIntegrationTest {
     public void setUp() throws Exception {
         powershellService = new PowershellService();
         powershellService.setPowershellSession(session);
+        powershellService.setAdUserPath("OU=Users,DC=local");
     }
 
     @Test
