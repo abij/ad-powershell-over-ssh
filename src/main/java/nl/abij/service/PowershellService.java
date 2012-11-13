@@ -11,7 +11,6 @@ import org.vngx.jsch.exception.JSchException;
 
 public class PowershellService {
 
-    private PowershellSession powershellSession;
     private String adUserPath;
 
     private static final String CREATE_USER =
@@ -22,8 +21,9 @@ public class PowershellService {
             " -AccountPassword (ConvertTo-SecureString -AsPlainText \"${passwordPlain}\" -Force)" +
             " -ChangePasswordAtLogon $false -PasswordNeverExpires $true -Enabled $true" +
             " -path \"${adUserPath}\"";
-    private static final String DELETE_USER = "Remove-ADUser -identity \"${samAccountName}\" -Confirm:$false";
 
+    private static final String REMOVE_USER =
+            "Remove-ADUser -identity \"${samAccountName}\" -Confirm:$false";
 
     public void createUser(String displayname, String email, String username, String password) throws JSchException, IOException {
         Map<String, String> model = new LinkedHashMap<String, String>();
@@ -35,14 +35,14 @@ public class PowershellService {
         model.put("passwordPlain", password);
         model.put("adUserPath", adUserPath);
 
-        powershellSession.execute(commando(CREATE_USER, model));
+        PowershellSession.getInstance().execute(commando(CREATE_USER, model));
     }
 
     public void removeUser(String username) throws JSchException, IOException {
         Map<String, String> model = new LinkedHashMap<String, String>();
         model.put("samAccountName", username);
 
-        powershellSession.execute(commando(CREATE_USER, model));
+        PowershellSession.getInstance().execute(commando(REMOVE_USER, model));
     }
 
     /**
@@ -65,10 +65,6 @@ public class PowershellService {
             throw new IllegalStateException("Command contains unfilled parameters: " + command);
         }
         return command;
-    }
-
-    public void setPowershellSession(PowershellSession powershellSession) {
-        this.powershellSession = powershellSession;
     }
 
     public void setAdUserPath(String adUserPath) {

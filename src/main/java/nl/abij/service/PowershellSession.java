@@ -17,24 +17,40 @@ import org.vngx.jsch.config.SSHConfigConstants;
 import org.vngx.jsch.config.SessionConfig;
 import org.vngx.jsch.exception.JSchException;
 
+/**
+ * PowerShell session as a Singleton. With synchronization around execute that allows this impl to perform 1 command at
+ * the time over 1 channel. With Jsch you can open multiple channels and execute commands in parallel.
+ *
+ * Nothing will stop you to modify this example to your needs.
+ */
 public class PowershellSession {
 
     private static final Logger LOG = LoggerFactory.getLogger(PowershellSession.class);
+
+    /* There is only 1 session, with getInstance() you can use it. */
+    private PowershellSession() {}
+    private static final PowershellSession INSTANCE = new PowershellSession();
+    public static PowershellSession getInstance() {
+        return INSTANCE;
+    }
+
     private static final int DEFAULT_BUFFER_SIZE = 1024;
     private static final Charset UTF8 = Charset.forName("UTF-8");
-    private static final int AD_MODULE_LOADINGTIME = 2000; // 2sec wait for loading...
+    private static final int AD_MODULE_LOADINGTIME = 1500; // 1,5 sec wait for loading AD module.
 
-    // required
+    // required settings
     private String username;
     private byte[] password;
     private String host;
-    // optional - defaults:
+
+    // optional settings with defaults:
     private int port = 22;
     private String knownHostFile = null; // No knownHostFile -> don't check server fingerprint.
     private int socketTimeout = 5 * 1000;// 5s.
     private int readTimeout = 3 * 1000;  // 3s max time wait & read from server
     private int pollTimeout = 20;        // 20 ms before read again.
 
+    // Instance variables
     private Session session;
     private ChannelShell shell;
     private InputStream fromServer;
@@ -62,18 +78,15 @@ public class PowershellSession {
         }
     }
 
-    /* This implementation allows 1 command to be executed at the time over 1 channel.
-     * With Jsch you can open multiple channels and execute commands in parallel.
-     * Nothing will stop you to modify this example to your needs.*/
     public synchronized void execute(String command) throws JSchException, IOException {
         checkConnection();
         writeToServer(command);
         verifyCommandSucceded();
     }
 
-   /* *************************************************************************************
-    * Helper methodes
-    * *************************************************************************************/
+  /* *************************************************************************************
+   * Helper methodes
+   * *************************************************************************************/
 
     private void checkConnection() throws JSchException, IOException {
         if (!session.isConnected()) {
@@ -166,9 +179,6 @@ public class PowershellSession {
         disconnect(); // Always disconnect!
     }
 
-    /* *************************************************************************************
-     * Getters & Setters
-     * *************************************************************************************/
     public void setUsername(String username) {this.username = username;}
     public void setPassword(String password) {this.password = password.getBytes(UTF8);}
     public void setHost(String host) {this.host = host;}
