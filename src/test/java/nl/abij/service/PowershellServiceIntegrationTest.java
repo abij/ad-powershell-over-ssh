@@ -21,7 +21,7 @@ public class PowershellServiceIntegrationTest {
     @Before
     public void setUp() throws Exception {
         powershellService = new PowershellService();
-        powershellService.setAdUserPath("OU=Users,DC=local");
+        powershellService.setAdUserPath("OU=Users,DC=local"); // where are the user created in AD.
     }
 
     @Test

@@ -5,6 +5,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.Charset;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,8 +19,10 @@ import org.vngx.jsch.config.SSHConfigConstants;
 import org.vngx.jsch.config.SessionConfig;
 import org.vngx.jsch.exception.JSchException;
 
+import static java.util.regex.Pattern.CASE_INSENSITIVE;
+
 /**
- * PowerShell session as a Singleton. With synchronization around execute that allows this impl to perform 1 command at
+ * Powershell session as a Singleton. With synchronization around execute that allows this impl to perform 1 command at
  * the time over 1 channel. With Jsch you can open multiple channels and execute commands in parallel.
  *
  * Nothing will stop you to modify this example to your needs.
@@ -36,7 +40,6 @@ public class PowershellSession {
 
     private static final int DEFAULT_BUFFER_SIZE = 1024;
     private static final Charset UTF8 = Charset.forName("UTF-8");
-    private static final int AD_MODULE_LOADINGTIME = 1500; // 1,5 sec wait for loading AD module.
 
     // required settings
     private String username;
@@ -46,16 +49,26 @@ public class PowershellSession {
     // optional settings with defaults:
     private int port = 22;
     private String knownHostFile = null; // No knownHostFile -> don't check server fingerprint.
-    private int socketTimeout = 5 * 1000;// 5s.
-    private int readTimeout = 3 * 1000;  // 3s max time wait & read from server
-    private int pollTimeout = 20;        // 20 ms before read again.
+    private int socketTimeout = 30 * 1000;
+    private int readTimeout = 15 * 1000; // max time wait & read from server
+    private int adModuleReadTimeout = 30 * 1000; // Specially for loading AD-Module.
 
     // Instance variables
     private Session session;
     private ChannelShell shell;
     private InputStream fromServer;
     private OutputStream toServer;
+    private Pattern stopReadSign;
 
+  /* *************************************************************************************
+   * Public API: init / disconnect / execute
+   * *************************************************************************************/
+
+    /**
+     * After configuring this Singleton you should call init(), to initialize a Jsch session.
+     *
+     * @throws JSchException
+     */
     public void init() throws JSchException {
         JSch jSch = JSch.getInstance();
 
@@ -65,9 +78,31 @@ public class PowershellSession {
             config.setProperty(SSHConfigConstants.STRICT_HOST_KEY_CHECKING, "no");
         }
         session = jSch.createSession(username, host, port, config);
+        session.setTimeout(socketTimeout);
+
+        // Stop reading when:  \username> [optional: controll-chars, spaces and new-lines]
+        // Match case-insentitive: because your username could be different from server response.
+        stopReadSign = Pattern.compile("\\\\" + username + "> ?( *(\u001B\\[\\d+[mH])\n?)*$", CASE_INSENSITIVE);
     }
 
+    /**
+     * Don't need to disconnect after execution! Only when done with singleton, called automatically when destroyed.
+     */
     public void disconnect() {
+        if (fromServer != null) {
+            try {
+                fromServer.close();
+            } catch (IOException e) {
+                LOG.warn("Cannot close fromServer stream.", e);
+            }
+        }
+        if (toServer != null) {
+            try {
+                toServer.close();
+            } catch (IOException e) {
+                LOG.warn("Cannot close toServer stream.", e);
+            }
+        }
         if (shell != null && shell.isConnected()) {
             shell.disconnect();
             LOG.debug("Channel Shell is disconnected.");
@@ -88,33 +123,47 @@ public class PowershellSession {
    * Helper methodes
    * *************************************************************************************/
 
-    private void checkConnection() throws JSchException, IOException {
+    private void checkConnection() throws JSchException {
+        if (session == null) {
+            throw new IllegalStateException("Call init() first to initialize a Jsch session.");
+        }
+
         if (!session.isConnected()) {
             session.connect(socketTimeout, password);
-            LOG.debug("Session connected to host: {}", session.getHost());
+            this.password = null; // don't need the password in-memory anymore!
+            LOG.debug("Session connected to host: {}:{}", session.getHost(), session.getPort());
         } else {
             LOG.debug("Session is still connected.");
         }
-        if (shell == null || !shell.isConnected()) {
-            shell = session.openChannel(ChannelType.SHELL);
-            shell.connect(socketTimeout);
-            LOG.debug("ChannelShell is connected.");
 
-            fromServer = shell.getInputStream();
-            toServer = shell.getOutputStream();
+        try {
+            if (shell == null || !shell.isConnected()) {
+                shell = session.openChannel(ChannelType.SHELL);
+                shell.connect(socketTimeout);
+                LOG.info("ChannelShell is connected. Waiting for prompt...");
 
-            readFromServer(); // Read initial data: Windows PowerShell ... All rights reserved.
-            loadModuleActiveDirectory();
-        } else {
-            LOG.debug("Channel (shell) still open.");
+                fromServer = shell.getInputStream();
+                toServer = shell.getOutputStream();
+
+                verifyCommandSucceded(); // Read initial data: Windows PowerShell ... All rights reserved.
+                loadModuleActiveDirectory();
+            } else {
+                LOG.debug("Channel (shell) still open.");
+            }
+        } catch (Exception e) {
+            LOG.error("Shell is not opened correctly, failed to read prompt or load module AD, disconnect shell.");
+            if (shell != null && !shell.isClosed()) {
+                shell.disconnect();
+            }
+            throw new RuntimeException(e);
         }
     }
 
     private void loadModuleActiveDirectory() throws IOException {
         LOG.debug("import-module ActiveDirectory...");
         writeToServer("import-module ActiveDirectory");
-        sleep(AD_MODULE_LOADINGTIME, "Failed to sleep after loading module ActiveDirectory.");
-        verifyCommandSucceded();
+        verifyCommandSucceded(adModuleReadTimeout);
+        LOG.debug("module ActiveDirectory is loaded.");
     }
 
     private void writeToServer(String command) throws IOException {
@@ -126,14 +175,13 @@ public class PowershellSession {
         toServer.flush();
     }
 
-    private String readFromServer() throws IOException {
+    private String readFromServer(long readTimeout) throws IOException {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
 
-        String linePrompt = "\\" + username + ">"; // indicates console has new-line is ready for input, stop reading.
         long timeout = System.currentTimeMillis() + readTimeout;
 
-        while (System.currentTimeMillis() < timeout && !Util.byte2str(bos.toByteArray()).contains(linePrompt)) {
+        while (timoutNotExceedded(timeout) && !containsStopSign(bos)) {
             while (fromServer.available() > 0) {
                 int count = fromServer.read(buffer, 0, DEFAULT_BUFFER_SIZE);
                 if (count >= 0) {
@@ -143,33 +191,49 @@ public class PowershellSession {
                 }
             }
             if (shell.isClosed()) {
+                LOG.debug("Channel closed during reading.");
                 break;
             }
-            // Don't spin like crazy though the while loop
-            sleep(pollTimeout, "Failed to sleep between reads with pollTimeout: " + pollTimeout);
         }
+        // Double check is actually done with command?
+        if (!containsStopSign(bos)) {
+            throw new PowershellException("Execution of powershell command is not finished within " + readTimeout
+                    + "ms. Make sure the readTimeout is high enough.");
+        }
+
         String result = bos.toString("UTF-8");
-        LOG.debug("read from server:\n{}", result);
+        LOG.trace("read from server:\n{}", result);
         return result;
+    }
+
+    private boolean timoutNotExceedded(long timeout) {
+        return System.currentTimeMillis() < timeout;
+    }
+
+    private boolean containsStopSign(ByteArrayOutputStream bos) {
+        String readString = Util.byte2str(bos.toByteArray());
+        Matcher m = stopReadSign.matcher(readString);
+
+        if (m.find()) {
+            LOG.debug("StopSign has been read.");
+            return true;
+        }
+        return false;
+    }
+
+    private void verifyCommandSucceded() throws IOException {
+        verifyCommandSucceded(readTimeout);
     }
 
     /**
      * @throws PowershellException If the message was not executed successfully, with details info.
      */
-    private void verifyCommandSucceded() throws IOException {
-        String message = readFromServer();
+    private void verifyCommandSucceded(long readTimeout) throws IOException {
+        String message = readFromServer(readTimeout);
         writeToServer("$?"); // Aks powershell status of last command?
 
-        if (!readFromServer().contains("True")) {
+        if (!readFromServer(readTimeout).contains("True")) {
             throw new PowershellException(message);
-        }
-    }
-
-    private void sleep(long timeout, String msg) {
-        try {
-            Thread.sleep(timeout);
-        } catch (Exception ee) {
-            LOG.debug(msg);
         }
     }
 
@@ -187,5 +251,5 @@ public class PowershellSession {
     public void setSocketTimeout(int socketTimeout) {this.socketTimeout = socketTimeout;}
     public void setSession(Session session) {this.session = session;}
     public void setReadTimeout(int readTimeout) {this.readTimeout = readTimeout;}
-    public void setPollTimeout(int pollTimeout) {this.pollTimeout = pollTimeout;}
+    public void setAdModuleReadTimeout(int adModuleTimeout) {this.adModuleReadTimeout = adModuleTimeout;}
 }
